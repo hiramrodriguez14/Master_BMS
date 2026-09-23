@@ -18,6 +18,9 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "cmsis_os.h"
+#include "bq79600.h"
+#include "telemetry.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -25,6 +28,7 @@
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
+typedef StaticTask_t osStaticThreadDef_t;
 /* USER CODE BEGIN PTD */
 
 /* USER CODE END PTD */
@@ -40,21 +44,49 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+CAN_HandleTypeDef hcan;
 
+TIM_HandleTypeDef htim4;
+
+/* Definitions for defaultTask */
+osThreadId_t defaultTaskHandle;
+const osThreadAttr_t defaultTask_attributes = {
+  .name = "defaultTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for dataAcquisition */
+osThreadId_t dataAcquisitionHandle;
+uint32_t dataAcquisitionBuffer[ 1024 ];
+osStaticThreadDef_t dataAcquisitionControlBlock;
+const osThreadAttr_t dataAcquisition_attributes = {
+  .name = "dataAcquisition",
+  .cb_mem = &dataAcquisitionControlBlock,
+  .cb_size = sizeof(dataAcquisitionControlBlock),
+  .stack_mem = &dataAcquisitionBuffer[0],
+  .stack_size = sizeof(dataAcquisitionBuffer),
+  .priority = (osPriority_t) osPriorityLow,
+};
 /* USER CODE BEGIN PV */
+Telemetry_t g_telemetry = {0};
 
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_CAN_Init(void);
+static void MX_TIM4_Init(void);
+void StartDefaultTask(void *argument);
+void StartDataAcquisitionTask(void *argument);
+
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
+osMutexId_t telemetryMutex;
 /* USER CODE END 0 */
 
 /**
@@ -75,6 +107,8 @@ int main(void)
 
   /* USER CODE BEGIN Init */
 
+  telemetryMutex = osMutexNew(NULL);
+
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -86,9 +120,75 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_CAN_Init();
+  MX_TIM4_Init();
+  printf("BQ79600 Battery Monitor System Starting...\r\n");
+
+  // Step 2: Wake up and initialize the BQ79600 and BQ79616
+
+  printf("Waking up BQ79600...\r\n");
+  // wake is true if device went into shutdown mode
+  HAL_StatusTypeDef status;
+  bool wake = false;
+  status = BQ79600_WakeUp(TOTALBOARDS,wake);
+  if(status == HAL_OK){
+	  printf("Wake GOOD\r\n");
+  }
+
+  //auto-address the stack
+  printf("Auto-addressing...\r\n");
+  status = SpiAutoAddress(TOTALBOARDS);
+  if(status == HAL_OK){
+  	  printf("Auto-addressing GOOD\r\n");
+   }
+  else
+	  printf("HAL ERROR %d\r\n", status);
+
+
+  printf("Initialization complete, starting kernel...\r\n");
+
   /* USER CODE BEGIN 2 */
 
   /* USER CODE END 2 */
+
+  /* Init scheduler */
+  osKernelInitialize();
+
+  /* USER CODE BEGIN RTOS_MUTEX */
+  /* add mutexes, ... */
+  /* USER CODE END RTOS_MUTEX */
+
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* add semaphores, ... */
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+  /* start timers, add new ones, ... */
+  /* USER CODE END RTOS_TIMERS */
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  /* add queues, ... */
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  /* creation of defaultTask */
+  //defaultTaskHandle = osThreadNew(StartDefaultTask, &g_telemetry, &defaultTask_attributes);
+
+  /* creation of dataAcquisition */
+  dataAcquisitionHandle = osThreadNew(StartDataAcquisitionTask, &g_telemetry, &dataAcquisition_attributes);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+  /* add threads, ... */
+  /* USER CODE END RTOS_THREADS */
+
+  /* USER CODE BEGIN RTOS_EVENTS */
+  /* add events, ... */
+  /* USER CODE END RTOS_EVENTS */
+
+  /* Start scheduler */
+  osKernelStart();
+
+  /* We should never get here as control is now taken by the scheduler */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
@@ -109,6 +209,7 @@ void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+  RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
 
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
@@ -138,6 +239,94 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_TIM34;
+  PeriphClkInit.Tim34ClockSelection = RCC_TIM34CLK_HCLK;
+  if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/**
+  * @brief CAN Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_CAN_Init(void)
+{
+
+  /* USER CODE BEGIN CAN_Init 0 */
+
+  /* USER CODE END CAN_Init 0 */
+
+  /* USER CODE BEGIN CAN_Init 1 */
+
+  /* USER CODE END CAN_Init 1 */
+  hcan.Instance = CAN;
+  hcan.Init.Prescaler = 16;
+  hcan.Init.Mode = CAN_MODE_NORMAL;
+  hcan.Init.SyncJumpWidth = CAN_SJW_1TQ;
+  hcan.Init.TimeSeg1 = CAN_BS1_1TQ;
+  hcan.Init.TimeSeg2 = CAN_BS2_1TQ;
+  hcan.Init.TimeTriggeredMode = DISABLE;
+  hcan.Init.AutoBusOff = DISABLE;
+  hcan.Init.AutoWakeUp = DISABLE;
+  hcan.Init.AutoRetransmission = DISABLE;
+  hcan.Init.ReceiveFifoLocked = DISABLE;
+  hcan.Init.TransmitFifoPriority = DISABLE;
+  if (HAL_CAN_Init(&hcan) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN CAN_Init 2 */
+
+  /* USER CODE END CAN_Init 2 */
+
+}
+
+/**
+  * @brief TIM4 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM4_Init(void)
+{
+
+  /* USER CODE BEGIN TIM4_Init 0 */
+
+  /* USER CODE END TIM4_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM4_Init 1 */
+
+  /* USER CODE END TIM4_Init 1 */
+  htim4.Instance = TIM4;
+  htim4.Init.Prescaler = 0;
+  htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim4.Init.Period = 65535;
+  htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim4, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM4_Init 2 */
+
+  /* USER CODE END TIM4_Init 2 */
+
 }
 
 /**
@@ -159,7 +348,10 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(BQ79600CS_GPIO_Port, BQ79600CS_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(SDCARD_CS_GPIO_Port, SDCARD_CS_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : B1_Pin */
   GPIO_InitStruct.Pin = B1_Pin;
@@ -167,20 +359,75 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : USART_TX_Pin USART_RX_Pin */
-  GPIO_InitStruct.Pin = USART_TX_Pin|USART_RX_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  /*Configure GPIO pins : PA1 PA2 */
+  GPIO_InitStruct.Pin = GPIO_PIN_1|GPIO_PIN_2;
+  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  GPIO_InitStruct.Alternate = GPIO_AF7_USART2;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : LD2_Pin */
-  GPIO_InitStruct.Pin = LD2_Pin;
+  /*Configure GPIO pin : BQ79600CS_Pin */
+  GPIO_InitStruct.Pin = BQ79600CS_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(LD2_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(BQ79600CS_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PA5 PA6 PA7 */
+  GPIO_InitStruct.Pin = GPIO_PIN_5|GPIO_PIN_6|GPIO_PIN_7;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  GPIO_InitStruct.Alternate = GPIO_AF5_SPI1;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : BQ_NFAULT_Pin */
+  GPIO_InitStruct.Pin = BQ_NFAULT_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(BQ_NFAULT_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : BQ_SPI_READY_Pin READY_PWR_SENSE_Pin CHARGE_PWR_SENSE_Pin */
+  GPIO_InitStruct.Pin = BQ_SPI_READY_Pin|READY_PWR_SENSE_Pin|CHARGE_PWR_SENSE_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PB10 PB11 */
+  GPIO_InitStruct.Pin = GPIO_PIN_10|GPIO_PIN_11;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  GPIO_InitStruct.Alternate = GPIO_AF7_USART3;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : SDCARD_CS_Pin */
+  GPIO_InitStruct.Pin = SDCARD_CS_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(SDCARD_CS_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PB13 PB14 PB15 */
+  GPIO_InitStruct.Pin = GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  GPIO_InitStruct.Alternate = GPIO_AF5_SPI2;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : RED_Pin BLUE_Pin GREEN_Pin */
+  GPIO_InitStruct.Pin = RED_Pin|BLUE_Pin|GREEN_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Alternate = GPIO_AF6_TIM1;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : SDCARD_DET_Pin */
+  GPIO_InitStruct.Pin = SDCARD_DET_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(SDCARD_DET_GPIO_Port, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -190,6 +437,53 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 
 /* USER CODE END 4 */
+
+/* USER CODE BEGIN Header_StartDefaultTask */
+/**
+  * @brief  Function implementing the defaultTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartDefaultTask */
+void StartDefaultTask(void *argument)
+{
+  /* USER CODE BEGIN 5 */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END 5 */
+}
+
+/* USER CODE BEGIN Header_StartDataAcquisitionTask */
+/**
+* @brief Function implementing the dataAcquisition thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartDataAcquisitionTask */
+void StartDataAcquisitionTask(void *argument)
+{
+  /* USER CODE BEGIN StartDataAcquisitionTask */
+  /* Infinite loop */
+  Telemetry_t *telemetry = (Telemetry_t *)argument;
+  for(;;)
+  {
+  //set the task to sample every 10 ms so 100Hz
+  //get cell voltages with BQ driver, need to know how many cells there will be
+   HAL_StatusTypeDef status;
+   status  = stackVoltageRead(&telemetryMutex, telemetry);
+   if(status == HAL_OK){
+    printf("VOLTAGE_READ_GOOD\r\n");
+   } else {
+    printf("VOLTAGE READ ERROR %d\r\n",status);
+   }
+  //get temperatures, need to modify bq driver
+  //read ADC, make a 4 sample moving average
+  }
+  /* USER CODE END StartDataAcquisitionTask */
+}
 
 /**
   * @brief  Period elapsed callback in non blocking mode

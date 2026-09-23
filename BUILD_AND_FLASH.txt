@@ -1,0 +1,128 @@
+BMS_Master - Build / Flash / Add Files
+=====================================
+
+0) Requirements
+---------------
+- Homebrew installed
+- GNU ARM Toolchain installed
+- OpenOCD installed
+
+Check:
+  which arm-none-eabi-gcc
+  arm-none-eabi-gcc --version
+  which openocd
+  openocd --version
+
+If arm-none-eabi-gcc is missing:
+  export PATH=/usr/local/bin:$PATH
+
+If openocd is missing:
+  brew install openocd
+
+
+1) Build the project
+--------------------
+From the project root:
+  cd "/Users/hiramraul11gmail.com/CRE/BMS_Master/Firmware"
+  export PATH=/usr/local/bin:$PATH
+  make -j4
+
+To clean:
+  make clean
+
+Artifacts are generated in:
+  build/BMS_Master.elf
+  build/BMS_Master.hex
+  build/BMS_Master.bin
+
+
+2) Verify the build succeeded
+----------------------------
+  ls -l build
+  arm-none-eabi-size build/BMS_Master.elf
+
+
+3) Flash with OpenOCD (ST-Link / SWD)
+-------------------------------------
+Start OpenOCD in one terminal:
+  openocd -f interface/stlink.cfg -f target/stm32f3x.cfg
+
+If your adapter is different, check the correct cfg file; for ST-Link this is usually:
+  interface/stlink.cfg
+  target/stm32f3x.cfg
+
+In another terminal, load the firmware:
+  arm-none-eabi-gdb build/BMS_Master.elf -ex "target extended-remote localhost:3333" -ex "monitor reset halt" -ex "load" -ex "monitor reset" -ex "quit"
+
+Or use direct flash mode if available:
+  openocd -f interface/stlink.cfg -f target/stm32f3x.cfg -c "program build/BMS_Master.elf verify reset exit"
+
+
+4) Reset / halt / continue
+-------------------------
+In gdb:
+  monitor reset halt
+  monitor reset
+  continue
+
+
+5) When adding a new file (.c / .h)
+-----------------------------------
+This project uses a manual Makefile and does not auto-discover files by glob pattern.
+You must add it to the C_SOURCES or ASM_SOURCES variable inside:
+  Makefile
+
+Example:
+  C_SOURCES =  \
+  Core/Src/main.c \
+  Core/Src/my_new_file.c \
+  Drivers/.../xxx.c
+
+If you add a new folder, also include its path in the include list:
+  C_INCLUDES =  \
+  -ICore/Inc \
+  -IDrivers/STM32F3xx_HAL_Driver/Inc \
+  -IDrivers/CMSIS/Include
+
+If you add a file with the same object name, it will not cause issues as long as it is included in the source list.
+
+After editing the Makefile:
+  make clean
+  make -j4
+
+
+6) If you add a new module or feature
+-------------------------------------
+- Add the .c file to C_SOURCES
+- Add its includes in the file that uses it
+- If it is startup or assembly code, add it to ASM_SOURCES
+- If it is an external library, adjust INCLUDE PATH and LIBS as needed
+
+
+7) If the MCU / target changes
+------------------------------
+Check these values in the Makefile:
+  TARGET = BMS_Master
+  C_DEFS =  \
+  -DUSE_HAL_DRIVER \
+  -DSTM32F303xE
+
+And the linker script:
+  LDSCRIPT = STM32F303xx_FLASH.ld
+
+If you change the board or microcontroller, also update:
+  -DSTM32F303xE
+  STM32F303xx_FLASH.ld
+  startup_stm32f303xe.s
+
+
+8) Recommended workflow
+-----------------------
+For this project, the normal sequence is:
+  make clean
+  make -j4
+  openocd -f interface/stlink.cfg -f target/stm32f3x.cfg
+  arm-none-eabi-gdb build/BMS_Master.elf -ex "target extended-remote localhost:3333" -ex "monitor reset halt" -ex "load" -ex "monitor reset" -ex "quit"
+
+If you want direct flash without gdb:
+  openocd -f interface/stlink.cfg -f target/stm32f3x.cfg -c "program build/BMS_Master.elf verify reset exit"

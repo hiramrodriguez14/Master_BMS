@@ -1,0 +1,28 @@
+# Build artifacts
+/build/
+*.o
+*.d
+*.lst
+*.elf
+*.hex
+*.bin
+*.map
+*.axf
+*.out
+*.su
+*.srec
+*.mk
+
+# IDE/editor local files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Optional: generated logs
+*.log

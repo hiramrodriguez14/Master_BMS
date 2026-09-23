@@ -59,18 +59,32 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define B1_Pin GPIO_PIN_13
 #define B1_GPIO_Port GPIOC
-#define USART_TX_Pin GPIO_PIN_2
-#define USART_TX_GPIO_Port GPIOA
-#define USART_RX_Pin GPIO_PIN_3
-#define USART_RX_GPIO_Port GPIOA
-#define LD2_Pin GPIO_PIN_5
-#define LD2_GPIO_Port GPIOA
+#define BQ79600CS_Pin GPIO_PIN_4
+#define BQ79600CS_GPIO_Port GPIOA
+#define BQ_NFAULT_Pin GPIO_PIN_1
+#define BQ_NFAULT_GPIO_Port GPIOB
+#define BQ_SPI_READY_Pin GPIO_PIN_2
+#define BQ_SPI_READY_GPIO_Port GPIOB
+#define SDCARD_CS_Pin GPIO_PIN_12
+#define SDCARD_CS_GPIO_Port GPIOB
+#define RED_Pin GPIO_PIN_8
+#define RED_GPIO_Port GPIOA
+#define BLUE_Pin GPIO_PIN_9
+#define BLUE_GPIO_Port GPIOA
+#define GREEN_Pin GPIO_PIN_10
+#define GREEN_GPIO_Port GPIOA
 #define TMS_Pin GPIO_PIN_13
 #define TMS_GPIO_Port GPIOA
 #define TCK_Pin GPIO_PIN_14
 #define TCK_GPIO_Port GPIOA
+#define SDCARD_DET_Pin GPIO_PIN_15
+#define SDCARD_DET_GPIO_Port GPIOA
 #define SWO_Pin GPIO_PIN_3
 #define SWO_GPIO_Port GPIOB
+#define READY_PWR_SENSE_Pin GPIO_PIN_5
+#define READY_PWR_SENSE_GPIO_Port GPIOB
+#define CHARGE_PWR_SENSE_Pin GPIO_PIN_7
+#define CHARGE_PWR_SENSE_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 

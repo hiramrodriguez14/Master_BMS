@@ -3,14 +3,29 @@
     {
       "name": "macos-clang-x64",
       "includePath": [
+        "${workspaceFolder}/Core/Inc",
+        "${workspaceFolder}/Drivers/STM32F3xx_HAL_Driver/Inc",
+        "${workspaceFolder}/Drivers/STM32F3xx_HAL_Driver/Inc/Legacy",
+        "${workspaceFolder}/Drivers/CMSIS/Device/ST/STM32F3xx/Include",
+        "${workspaceFolder}/Drivers/CMSIS/Include",
+        "${workspaceFolder}/Middlewares/Third_Party/FreeRTOS/Source/include",
+        "${workspaceFolder}/Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2",
+        "${workspaceFolder}/Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM4F",
         "${workspaceFolder}/**"
       ],
-      "compilerPath": "/usr/bin/clang",
+      "defines": [
+        "USE_HAL_DRIVER",
+        "STM32F303xE"
+      ],
+      "compilerPath": "/usr/local/bin/arm-none-eabi-gcc",
       "cStandard": "${default}",
       "cppStandard": "${default}",
       "intelliSenseMode": "macos-clang-x64",
       "compilerArgs": [
-        ""
+        "-mcpu=cortex-m4",
+        "-mthumb",
+        "-mfpu=fpv4-sp-d16",
+        "-mfloat-abi=hard"
       ]
     }
   ],
