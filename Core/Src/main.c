@@ -21,7 +21,7 @@
 #include "cmsis_os.h"
 #include "bq79600.h"
 #include "telemetry.h"
-
+#include "bms_config.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "data_acquisition.h"
@@ -67,6 +67,18 @@ const osThreadAttr_t dataAcquisition_attributes = {
   .cb_size = sizeof(dataAcquisitionControlBlock),
   .stack_mem = &dataAcquisitionBuffer[0],
   .stack_size = sizeof(dataAcquisitionBuffer),
+  .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for safetyManager */
+osThreadId_t safetyManagerHandle;
+uint32_t safetyManagerBuffer[ 1024 ];
+osStaticThreadDef_t safetyManagerControlBlock;
+const osThreadAttr_t safetyManager_attributes = {
+  .name = "safetyManager",
+  .cb_mem = &safetyManagerControlBlock,
+  .cb_size = sizeof(safetyManagerControlBlock),
+  .stack_mem = &safetyManagerBuffer[0],
+  .stack_size = sizeof(safetyManagerBuffer),
   .priority = (osPriority_t) osPriorityLow,
 };
 /* USER CODE BEGIN PV */
@@ -196,6 +208,7 @@ int main(void)
   /* creation of dataAcquisition */
   dataAcquisitionHandle = osThreadNew(StartDataAcquisitionTask, &g_telemetry, &dataAcquisition_attributes);
 
+  safetyManagerHandle = osThreadNew(StartSafetyManagerTask, &g_telemetry, &safetyManager_attributes);
   /* USER CODE BEGIN RTOS_THREADS */
   if (dataAcquisitionHandle == NULL) Error_Handler();
   /* USER CODE END RTOS_THREADS */
@@ -488,6 +501,81 @@ void StartDataAcquisitionTask(void *argument)
   acquiredata(argument);
   /* USER CODE END StartDataAcquisitionTask */
 }
+
+/* USER CODE BEGIN Header_StartSafetyManagerTask */
+/**
+* @brief Function implementing the safetyManager thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartDataAcquisitionTask */
+void StartSafetyManagerTask(void *argument)
+{
+  /* USER CODE BEGIN StartSafetyManagerTask */
+  Telemetry_t *telemetry = (Telemetry_t*)argument;
+
+  while(1){
+
+   //Step 1 copy telemetry to local values so the mutex isnt locke by this task
+  TickType_t last = xTaskGetTickCount();
+  osMutexAcquire(telemetryMutex, osWaitForever);
+  uint32_t acquisition_errors = telemetry->acquisition_errors;
+  bool voltage_valid = telemetry->voltage_valid;
+  bool current_valid = telemetry->current_valid;
+  uint32_t current_errors = telemetry->current_errors;
+  bool temperature_valid = telemetry->temperature_valid;
+  uint32_t temperature_errors = telemetry->temperature_errors;   
+  float min_temperature_C = telemetry->min_temperature_C;
+  float max_temperature_C = telemetry->max_temperature_C;
+  float pack_voltage_mV = telemetry->pack_voltage_mV;
+  float cell_voltage[TOTAL_CELLS] = telemetry->cell_voltage[TOTAL_CELLS];
+  float min_cell_voltage_mV = telemetry->min_cell_voltage_mV;
+  float max_cell_voltage_mV = telemetry->max_cell_voltage_mV;
+  osMutexRelease(telemetryMutex);
+
+  //Step two check every fault condition, update fault flag and notify CAN Controller Task
+   if (max_temperature_C >= MAX_TEMP)
+   {
+     xTaskNotify(canTaskHandle, FAULT_OVTEMP, eSetValueWithOverwrite);
+   }
+
+   if(min_temperature_C <= MIN_TEMP){
+     xTaskNotify(canTaskHandle, FAULT_UNDTEMP, eSetValueWithOverwrite);
+   }
+
+   if(!temperature_valid || (temperature_errors != 0)){
+     xTaskNotify(canTaskHandle, FAULT_TEMPNOTVALID, eSetValueWithOverwrite);
+   }
+
+   if(!voltage_valid || (acquisition_errors != 0)){
+     xTaskNotify(canTaskHandle, FAULT_VOLTERR, eSetValueWithOverwrite);
+   }
+
+   if(!current_valid || (current_errors != 0)){
+     xTaskNotify(canTaskHandle, FAULT_CURRERR, eSetValueWithOverwrite);
+   }
+
+   if(pack_voltage_mV > MAX_PACK_VOLTAGE){
+     xTaskNotify(canTaskHandle, FAULT_OVVOLTAGE, eSetValueWithOverwrite);
+   }
+
+   if(pack_voltage_mV < MIN_PACK_VOLTAGE){
+    xTaskNotify(canTaskHandle, FAULT_UNDVOLTAGE, eSetValueWithOverwrite);
+   }
+
+   if(min_cell_voltage_mV < MIN_CELL_VOLTAGE){
+    xTaskNotify(canTaskHandle, FAULT_MINCELLVOLT, eSetValueWithOverwrite);
+   }
+
+   if(max_cell_voltage_mV > MAX_CELL_VOLTAGE){
+    xTaskNotify(canTaskHandle, FAULT_MAXCELLVOLT, eSetValueWithOverwrite);
+   }
+
+   //Make algorith to see if a fuse tripped
+   vTaskDelayUntil(&last, 5);
+  /* USER CODE END StartDataAcquisitionTask */
+}
+
 
 /**
   * @brief  Period elapsed callback in non blocking mode
