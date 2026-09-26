@@ -37,6 +37,13 @@ BUILD_DIR = build
 # C sources
 C_SOURCES =  \
 Core/Src/main.c \
+Core/Src/bq79600_driver.c \
+Core/Src/data_acquisition.c \
+Core/Src/current_sensor.c \
+Drivers/STM32F3xx_HAL_Driver/Src/stm32f3xx_hal_adc.c \
+Drivers/STM32F3xx_HAL_Driver/Src/stm32f3xx_hal_adc_ex.c \
+Drivers/STM32F3xx_HAL_Driver/Src/stm32f3xx_hal_opamp.c \
+Drivers/STM32F3xx_HAL_Driver/Src/stm32f3xx_hal_spi.c \
 Core/Src/stm32f3xx_it.c \
 Core/Src/stm32f3xx_hal_msp.c \
 Core/Src/stm32f3xx_hal_timebase_tim.c \

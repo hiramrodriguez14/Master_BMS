@@ -24,6 +24,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "data_acquisition.h"
+#include "current_sensor.h"
 
 /* USER CODE END Includes */
 
@@ -68,6 +70,7 @@ const osThreadAttr_t dataAcquisition_attributes = {
   .priority = (osPriority_t) osPriorityLow,
 };
 /* USER CODE BEGIN PV */
+SPI_HandleTypeDef hspi1;
 Telemetry_t g_telemetry = {0};
 
 /* USER CODE END PV */
@@ -81,11 +84,44 @@ void StartDefaultTask(void *argument);
 void StartDataAcquisitionTask(void *argument);
 
 /* USER CODE BEGIN PFP */
+static void BMS_SPI_Init(void);
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static void BMS_SPI_Init(void)
+{
+  __HAL_RCC_SPI1_CLK_ENABLE();
+  hspi1.Instance = SPI1;
+  hspi1.Init.Mode = SPI_MODE_MASTER;
+  hspi1.Init.Direction = SPI_DIRECTION_2LINES;
+  hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
+  hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
+  hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
+  hspi1.Init.NSS = SPI_NSS_SOFT;
+  /* Current PCLK2 = 72 MHz: SPI = 4.5 MHz (BQ79600 range 2..6 MHz). */
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_16;
+  hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
+  hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
+  hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+  hspi1.Init.CRCPolynomial = 7;
+  hspi1.Init.CRCLength = SPI_CRC_LENGTH_DATASIZE;
+  hspi1.Init.NSSPMode = SPI_NSS_PULSE_DISABLE;
+  if (HAL_SPI_Init(&hspi1) != HAL_OK) Error_Handler();
+}
+
+void Delay_us(uint32_t us)
+{
+  /* Splitting long waits keeps subtraction valid across the 16-bit wrap. */
+  while (us != 0U) {
+    uint16_t count = us > 60000U ? 60000U : (uint16_t)us;
+    uint16_t start = (uint16_t)__HAL_TIM_GET_COUNTER(&htim4);
+    while ((uint16_t)((uint16_t)__HAL_TIM_GET_COUNTER(&htim4) - start) < count) {}
+    us -= count;
+  }
+}
+
 osMutexId_t telemetryMutex;
 /* USER CODE END 0 */
 
@@ -107,7 +143,7 @@ int main(void)
 
   /* USER CODE BEGIN Init */
 
-  telemetryMutex = osMutexNew(NULL);
+
 
   /* USER CODE END Init */
 
@@ -122,32 +158,14 @@ int main(void)
   MX_GPIO_Init();
   MX_CAN_Init();
   MX_TIM4_Init();
-  printf("BQ79600 Battery Monitor System Starting...\r\n");
-
-  // Step 2: Wake up and initialize the BQ79600 and BQ79616
-
-  printf("Waking up BQ79600...\r\n");
-  // wake is true if device went into shutdown mode
-  HAL_StatusTypeDef status;
-  bool wake = false;
-  status = BQ79600_WakeUp(TOTALBOARDS,wake);
-  if(status == HAL_OK){
-	  printf("Wake GOOD\r\n");
-  }
-
-  //auto-address the stack
-  printf("Auto-addressing...\r\n");
-  status = SpiAutoAddress(TOTALBOARDS);
-  if(status == HAL_OK){
-  	  printf("Auto-addressing GOOD\r\n");
-   }
-  else
-	  printf("HAL ERROR %d\r\n", status);
-
-
-  printf("Initialization complete, starting kernel...\r\n");
-
   /* USER CODE BEGIN 2 */
+  BMS_SPI_Init();
+  /* A failed current frontend does not prevent voltage acquisition. */
+  (void)CurrentSensor_Init();
+  /* TIM4 is clocked from HCLK, one counter tick per microsecond. */
+  __HAL_TIM_SET_PRESCALER(&htim4, HAL_RCC_GetHCLKFreq() / 1000000U - 1U);
+  htim4.Instance->EGR = TIM_EGR_UG;
+  if (HAL_TIM_Base_Start(&htim4) != HAL_OK) Error_Handler();
 
   /* USER CODE END 2 */
 
@@ -155,7 +173,8 @@ int main(void)
   osKernelInitialize();
 
   /* USER CODE BEGIN RTOS_MUTEX */
-  /* add mutexes, ... */
+  telemetryMutex = osMutexNew(NULL);
+  if (telemetryMutex == NULL) Error_Handler();
   /* USER CODE END RTOS_MUTEX */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
@@ -178,7 +197,7 @@ int main(void)
   dataAcquisitionHandle = osThreadNew(StartDataAcquisitionTask, &g_telemetry, &dataAcquisition_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
-  /* add threads, ... */
+  if (dataAcquisitionHandle == NULL) Error_Handler();
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -348,7 +367,7 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(BQ79600CS_GPIO_Port, BQ79600CS_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(BQ79600CS_GPIO_Port, BQ79600CS_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(SDCARD_CS_GPIO_Port, SDCARD_CS_Pin, GPIO_PIN_RESET);
@@ -466,22 +485,7 @@ void StartDefaultTask(void *argument)
 void StartDataAcquisitionTask(void *argument)
 {
   /* USER CODE BEGIN StartDataAcquisitionTask */
-  /* Infinite loop */
-  Telemetry_t *telemetry = (Telemetry_t *)argument;
-  for(;;)
-  {
-  //set the task to sample every 10 ms so 100Hz
-  //get cell voltages with BQ driver, need to know how many cells there will be
-   HAL_StatusTypeDef status;
-   status  = stackVoltageRead(&telemetryMutex, telemetry);
-   if(status == HAL_OK){
-    printf("VOLTAGE_READ_GOOD\r\n");
-   } else {
-    printf("VOLTAGE READ ERROR %d\r\n",status);
-   }
-  //get temperatures, need to modify bq driver
-  //read ADC, make a 4 sample moving average
-  }
+  acquiredata(argument);
   /* USER CODE END StartDataAcquisitionTask */
 }
 

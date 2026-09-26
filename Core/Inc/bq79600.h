@@ -44,14 +44,17 @@ extern "C" {
 
 //Constants
 // USER DEFINES
-#define TOTALBOARDS 8     // boards in stack
-#define ACTIVECHANNELS 14 // channels to activate (16 for BQ79616, 14 FOR BQ79614, etc)
-#define TOTAL_CELLS (TOTALBOARDS * ACTIVECHANNELS)
+#include "bms_config.h"
 #define MAXBYTES (16 * 2) // maximum number of bytes to be read from the devices (for array creation)
-#define RESPONSE_HEADER_SIZE 7 // SPI response frame head size
+#define RESPONSE_HEADER_SIZE 4 // SPI response frame head size
 #define CELL_BYTES_PER_BQ (ACTIVECHANNELS * 2)
-#define RESPONSE_BYTES_BQ (ACTIVECHANNELS + 6)
+#define RESPONSE_BYTES_BQ (CELL_BYTES_PER_BQ + 6)
 #define TOTAL_RESPONSE (TOTALBOARDS * RESPONSE_BYTES_BQ)
+#define REG_TSREF_HI 0x058C
+#define TEMPERATURE_BYTES_PER_BQ (2U + 2U * GPIO_TEMPERATURES_PER_BQ)
+#define TEMPERATURE_RESPONSE_BYTES_BQ (TEMPERATURE_BYTES_PER_BQ + 6U)
+#define TOTAL_TEMPERATURE_RESPONSE (TOTALBOARDS * TEMPERATURE_RESPONSE_BYTES_BQ)
+#define RX_BUFFER_SIZE ((TOTAL_RESPONSE > TOTAL_TEMPERATURE_RESPONSE) ? TOTAL_RESPONSE : TOTAL_TEMPERATURE_RESPONSE)
 
 #define FRMWRT_SGL_R 0x00     // single device READ
 #define FRMWRT_SGL_W 0x10     // single device WRITE
@@ -61,6 +64,7 @@ extern "C" {
 #define FRMWRT_ALL_W 0x50     // broadcast WRITE
 #define FRMWRT_REV_ALL_W 0x60 // broadcast WRITE reverse direction
 #define VCELL14_HI 0x056C
+#define VCELL_START_HI (0x0568 + 2 * (16 - ACTIVECHANNELS))
 
 /* Function prototypes -------------------------------------------------------*/
 
@@ -81,9 +85,13 @@ uint16_t SpiCRC16(uint8_t *pBuf, int nLen);
 HAL_StatusTypeDef SpiWrite(int nLen);
 HAL_StatusTypeDef SpiRead(int nLen, int rLen);
 HAL_StatusTypeDef SpiClear();
+HAL_StatusTypeDef BQ79616_StartADC(void);
+HAL_StatusTypeDef stackTemperatureRead(osMutexId_t *mutex, Telemetry_t *telemetry);
+void invalidateTemperatures(Telemetry_t *telemetry); /* Caller holds telemetry mutex. */
+bool convert_gpio_to_temperature(uint16_t gpio_raw, uint16_t tsref_raw, float *celsius);
 HAL_StatusTypeDef stackVoltageRead(osMutexId_t *telemetryMutex, Telemetry_t* telemetry);
 HAL_StatusTypeDef spiWriteReg(uint8_t devAddr, uint16_t regAddr, uint8_t data[], uint8_t sendLen, uint8_t packetType);
-uint32_t convert_adc_to_voltage(uint8_t high_byte, uint8_t low_byte);
+int32_t convert_adc_to_voltage(uint8_t high_byte, uint8_t low_byte);
 HAL_StatusTypeDef simpleBalancing();
 /**
  * @brief  Performs the BQ79600-Q1 wakeup sequence

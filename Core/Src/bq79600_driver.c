@@ -9,28 +9,30 @@
 #include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
-#define DEBUG 1
-
-// GLOBAL VARIABLES (use these to avoid stack overflows by creating too many function variables)
-// avoid creating variables/arrays in functions, or you will run out of stack space quickly
-uint16_t crc = 0;
-HAL_StatusTypeDef status;
-uint32_t timeout;
-uint8_t SOC = 0;
-// SpiWriteFrame
-uint8_t tx_data[8];
-uint8_t rx_data[TOTAL_RESPONSE];
-float voltStackRead[ACTIVECHANNELS];
-uint16_t voltage = 0;
-
-int M = 0; // expected total response bytes
-int i = 0; // number of groups of 128 bytes
-int K = 0; // number of bytes remaining in the last group of 128
+#include <math.h>
+#include <float.h>
+/* Single-owner driver: only the acquisition task may access SPI1. */
+static uint16_t crc;
+static HAL_StatusTypeDef status;
+static uint32_t timeout;
+static uint8_t tx_data[8];
+static uint8_t rx_data[RX_BUFFER_SIZE];
 
 extern SPI_HandleTypeDef hspi1;
-extern TIM_HandleTypeDef htim4;
-
 extern void Delay_us(uint32_t us);
+
+/* BQ79600 requires MOSI high between command frames. */
+static void mosiMode(bool idle)
+{
+    GPIO_InitTypeDef pin = {0};
+    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_SET);
+    pin.Pin = GPIO_PIN_7;
+    pin.Mode = idle ? GPIO_MODE_OUTPUT_PP : GPIO_MODE_AF_PP;
+    pin.Pull = GPIO_NOPULL;
+    pin.Speed = GPIO_SPEED_FREQ_HIGH;
+    pin.Alternate = GPIO_AF5_SPI1;
+    HAL_GPIO_Init(GPIOA, &pin);
+}
 
 // CRC16 TABLE
 // ITU_T polynomial: x^16 + x^15 + x^2 + 1
@@ -131,6 +133,7 @@ void SPI1_RestoreFromGPIO(void)
 
   // Re-enable SPI1
   __HAL_SPI_ENABLE(&hspi1);
+  mosiMode(true);
 }
 
 /*
@@ -197,8 +200,11 @@ HAL_StatusTypeDef BQ79600_WakeUp(uint8_t num_stacked_devices, bool need_double_w
   tx_data[3] = 0x09;  // LSB register address
   tx_data[4] = 0x20;  // 00100000 (enable SEND_WAKE)
 
-  SpiWrite(5);
-
+  HAL_StatusTypeDef result = SpiWrite(5);
+  if (result != HAL_OK) return result;
+  /* Each stack device must propagate WAKE and enter ACTIVE. */
+  HAL_Delay((num_stacked_devices * (BQ79600_WAKE_TONE_TIME_US +
+             BQ79600_ACTIVE_MODE_TIME_US) + 999U) / 1000U);
   return HAL_OK;
 }
 
@@ -207,198 +213,86 @@ HAL_StatusTypeDef BQ79600_WakeUp(uint8_t num_stacked_devices, bool need_double_w
  * @param  None
  * @retval None
  */
+static HAL_StatusTypeDef writeByte(uint8_t command, uint8_t device,
+                                   uint16_t reg, uint8_t value)
+{
+    int length = 0;
+    tx_data[length++] = command;
+    if (command == CMD_SINGLE_DEV_WRITE) tx_data[length++] = device;
+    tx_data[length++] = reg >> 8;
+    tx_data[length++] = reg & 0xFF;
+    tx_data[length++] = value;
+    return SpiWrite(length);
+}
+
 HAL_StatusTypeDef SpiAutoAddress(uint8_t numStackedDevices)
 {
-	//SYNC DLL
-	tx_data[0] = 0xB0;
-	tx_data[1] = 0x03;
-	tx_data[2] = 0x43;
-	tx_data[3] = 0x00;
-	SpiWrite(4);
-
-	tx_data[0] = 0xB0;
-	tx_data[1] = 0x03;
-	tx_data[2] = 0x44;
-	tx_data[3] = 0x00;
-	SpiWrite(4);
-
-	tx_data[0] = 0xB0;
-	tx_data[1] = 0x03;
-	tx_data[2] = 0x45;
-	tx_data[3] = 0x00;
-	SpiWrite(4);
-
-	tx_data[0] = 0xB0;
-	tx_data[1] = 0x03;
-	tx_data[2] = 0x46;
-	tx_data[3] = 0x00;
-	SpiWrite(4);
-
-	tx_data[0] = 0xB0;
-	tx_data[1] = 0x03;
-	tx_data[2] = 0x47;
-	tx_data[3] = 0x00;
-	SpiWrite(4);
-
-	tx_data[0] = 0xB0;
-	tx_data[1] = 0x03;
-	tx_data[2] = 0x48;
-	tx_data[3] = 0x00;
-	SpiWrite(4);
-
-	tx_data[0] = 0xB0;
-	tx_data[1] = 0x03;
-	tx_data[2] = 0x49;
-	tx_data[3] = 0x00;
-	SpiWrite(4);
-
-	tx_data[0] = 0xB0;
-	tx_data[1] = 0x03;
-	tx_data[2] = 0x4A;
-	tx_data[3] = 0x00;
-	SpiWrite(4);
-
-	//Enable auto-addressing mode
-	tx_data[0] = 0xD0;
-	tx_data[1] = 0x03;
-	tx_data[2] = 0x09;
-	tx_data[3] = 0x01;
-	SpiWrite(4);
-
-	uint8_t devAddr = 0x00;
-	//give each stack device and address
-	for(int i = 0; i <= numStackedDevices - 1; i++){
-		tx_data[0] = 0xD0;
-		tx_data[1] = 0x03;
-		tx_data[2] = 0x06;
-		tx_data[3] = devAddr;
-		SpiWrite(4);
-		devAddr += 1;
-	}
-
-	//set all stacked devices as stack
-	tx_data[0] = 0xD0;
-	tx_data[1] = 0x03;
-	tx_data[2] = 0x08;
-	tx_data[3] = 0x02;
-	SpiWrite(4);
-
-	//set top device to be top of stack
-	tx_data[0] = 0x90;
-	tx_data[1] = devAddr;
-	tx_data[2] = 0x03;
-	tx_data[3] = 0x08;
-	tx_data[4] = 0x03;
-	SpiWrite(5);
-
-	//SYNC DLL
-	tx_data[0] = 0xA0;
-	tx_data[1] = 0x03;
-	tx_data[2] = 0x43;
-	tx_data[3] = 0x00;
-	SpiRead(4,2);
-
-	tx_data[0] = 0xA0;
-	tx_data[1] = 0x03;
-	tx_data[2] = 0x44;
-	tx_data[3] = 0x00;
-	SpiRead(4,2);
-
-	tx_data[0] = 0xA0;
-	tx_data[1] = 0x03;
-	tx_data[2] = 0x45;
-	tx_data[3] = 0x00;
-	SpiRead(4,2);
-
-	tx_data[0] = 0xA0;
-	tx_data[1] = 0x03;
-	tx_data[2] = 0x46;
-	tx_data[3] = 0x00;
-	SpiRead(4,2);
-
-	tx_data[0] = 0xA0;
-	tx_data[1] = 0x03;
-	tx_data[2] = 0x47;
-	tx_data[3] = 0x00;
-	SpiRead(4,2);
-
-	tx_data[0] = 0xA0;
-	tx_data[1] = 0x03;
-	tx_data[2] = 0x48;
-	tx_data[3] = 0x00;
-	SpiRead(4,2);
-
-	tx_data[0] = 0xA0;
-	tx_data[1] = 0x03;
-	tx_data[2] = 0x49;
-	tx_data[3] = 0x00;
-	SpiRead(4,2);
-
-	tx_data[0] = 0xA0;
-	tx_data[1] = 0x03;
-	tx_data[2] = 0x4A;
-	tx_data[3] = 0x00;
-	SpiRead(4,2);
-
-
-	//Read from 0x0306
-	tx_data[0] = 0x80;
-	tx_data[1] = 0x00;
-	tx_data[2] = 0x03;
-	tx_data[3] = 0x06;
-	tx_data[4] = 0x00;
-	SpiRead(5,7);
-	printf("ADDR_0: 0x%02X\n", rx_data[4]);
-
-	tx_data[0] = 0x80;
-	tx_data[1] = 0x01;
-	tx_data[2] = 0x03;
-	tx_data[3] = 0x06;
-	tx_data[4] = 0x00;
-	SpiRead(5,7);
-	printf("ADDR_1: 0x%02X\n", rx_data[4]);
-
-	tx_data[0] = 0x80;
-	tx_data[1] = 0x00;
-	tx_data[2] = 0x20;
-	tx_data[3] = 0x01;
-	tx_data[4] = 0x00;
-	SpiRead(5,7);
-	printf("DEV_CONF: 0x%02X\n", rx_data[4]);
-
-
-	if(status != HAL_OK) {
-		return status;
-	}
-
+    if (numStackedDevices != TOTALBOARDS) return HAL_ERROR;
+    HAL_StatusTypeDef result;
+    for (uint16_t reg = 0x0343; reg <= 0x034A; ++reg) {
+        result = writeByte(CMD_STACK_WRITE, 0, reg, 0);
+        if (result != HAL_OK) return result;
+    }
+    result = writeByte(CMD_BROADCAST_WRITE, 0, REG_CONTROL1, 1);
+    if (result != HAL_OK) return result;
+    /* Address zero belongs to the bridge, monitors are 1..TOTALBOARDS. */
+    for (uint8_t address = 0; address <= numStackedDevices; ++address) {
+        result = writeByte(CMD_BROADCAST_WRITE, 0, REG_DIR0_ADDR, address);
+        if (result != HAL_OK) return result;
+    }
+    result = writeByte(CMD_BROADCAST_WRITE, 0, REG_COMM_CTRL, 2);
+    if (result != HAL_OK) return result;
+    result = writeByte(CMD_SINGLE_DEV_WRITE, numStackedDevices, REG_COMM_CTRL, 3);
+    if (result != HAL_OK) return result;
+    for (uint16_t reg = 0x0343; reg <= 0x034A; ++reg) {
+        tx_data[0] = CMD_STACK_READ;
+        tx_data[1] = reg >> 8;
+        tx_data[2] = reg & 0xFF;
+        tx_data[3] = 0;
+        result = SpiRead(4, 7 * numStackedDevices);
+        if (result != HAL_OK) return result;
+    }
+    for (uint8_t address = 0; address <= numStackedDevices; ++address) {
+        tx_data[0] = CMD_SINGLE_DEV_READ;
+        tx_data[1] = address;
+        tx_data[2] = REG_DIR0_ADDR >> 8;
+        tx_data[3] = REG_DIR0_ADDR & 0xFF;
+        tx_data[4] = 0;
+        result = SpiRead(5, 7);
+        if (result != HAL_OK) return result;
+        if (rx_data[4] != address) return HAL_ERROR;
+    }
     return HAL_OK;
 }
 
 HAL_StatusTypeDef SpiWrite(int sendLen)
 {
+	  if (sendLen < 1 || sendLen > (int)sizeof(tx_data) - 2) return HAL_ERROR;
 	  crc = SpiCRC16(tx_data, sendLen);
 	  tx_data[sendLen] = crc & 0xFF;
 	  tx_data[sendLen + 1] = (crc >> 8) & 0xFF;
 
 	  //Check if SPI_READY is high, with timeout
-	  timeout = HAL_GetTick() + 100;  // 100ms timeout
-	  while (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14) != GPIO_PIN_SET) {
-	    if (HAL_GetTick() >= timeout) {
+	  timeout = HAL_GetTick();  // 100ms timeout
+	  while (HAL_GPIO_ReadPin(BQ_SPI_READY_GPIO_Port, BQ_SPI_READY_Pin) != GPIO_PIN_SET) {
+	    if ((uint32_t)(HAL_GetTick() - timeout) >= 100U) {
 	      return HAL_TIMEOUT;
 	    }
 	    Delay_us(100);
 	  }
 
+	  mosiMode(false);
 	  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);
 
-	  Delay_us(0.5); //t9
+	  Delay_us(1); //t9
 
 	  // Send the command
 	  status = HAL_SPI_Transmit(&hspi1, tx_data, sendLen + 2, 100);
 
 	  // Pull nCS high
-	  Delay_us(0.5); //t10
+	  Delay_us(1); //t10
 	  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
+	  mosiMode(true);
 
 	  Delay_us(1);
 
@@ -409,52 +303,72 @@ HAL_StatusTypeDef SpiWrite(int sendLen)
 	  return HAL_OK;
 }
 
-HAL_StatusTypeDef SpiRead(int sendLen, int returnLen){
-
-	SpiWrite(sendLen);
-
-	for(int i = 0; i <= 7; i++) {
-		tx_data[i] = 0xFF;
-	}
-
-	timeout = HAL_GetTick() + 1;  // 1ms timeout
-	while (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14) != GPIO_PIN_SET) {
-		if (HAL_GetTick() >= timeout) {
-			SpiClear();
-			return HAL_TIMEOUT;
-		}
-		Delay_us(500);
-	}
-
-    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);
-
-    Delay_us(0.5); //t9
-
-    HAL_SPI_TransmitReceive(&hspi1, tx_data, rx_data, returnLen, HAL_MAX_DELAY);
-
-    Delay_us(0.5); //t10
-
-    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
-
-    Delay_us(1);
-
-    if (status != HAL_OK) {
-    	return status;
+HAL_StatusTypeDef SpiRead(int sendLen, int returnLen)
+{
+    uint8_t dummy[128];
+    if (returnLen < 7 || returnLen > (int)sizeof(rx_data) ||
+        (sendLen != 4 && sendLen != 5)) return HAL_ERROR;
+    const uint8_t command = tx_data[0];
+    const uint8_t device = sendLen == 5 ? tx_data[1] : 0;
+    const uint16_t reg = ((uint16_t)tx_data[sendLen - 3] << 8) |
+                         tx_data[sendLen - 2];
+    const unsigned payload = (unsigned)tx_data[sendLen - 1] + 1U;
+    const unsigned frameSize = payload + 6U;
+    if ((unsigned)returnLen % frameSize != 0U) return HAL_ERROR;
+    HAL_StatusTypeDef result = SpiWrite(sendLen);
+    if (result != HAL_OK) return result;
+    memset(dummy, 0xFF, sizeof(dummy));
+    /* Allow SPI_RDY to go low following the read command. */
+    Delay_us(5);
+    uint32_t start = HAL_GetTick();
+    const uint32_t waitMs = 2U + ((TOTALBOARDS - 1U) * 6U +
+                                      (unsigned)returnLen * 10U + 100U) / 1000U;
+    for (int offset = 0; offset < returnLen;) {
+        while (HAL_GPIO_ReadPin(BQ_SPI_READY_GPIO_Port, BQ_SPI_READY_Pin) != GPIO_PIN_SET) {
+            if ((uint32_t)(HAL_GetTick() - start) >= waitMs) return HAL_TIMEOUT;
+            Delay_us(5);
+        }
+        int count = returnLen - offset;
+        if (count > 128) count = 128;
+        mosiMode(false);
+        HAL_GPIO_WritePin(BQ79600CS_GPIO_Port, BQ79600CS_Pin, GPIO_PIN_RESET);
+        Delay_us(1);
+        result = HAL_SPI_TransmitReceive(&hspi1, dummy, &rx_data[offset], count, 5);
+        Delay_us(1);
+        HAL_GPIO_WritePin(BQ79600CS_GPIO_Port, BQ79600CS_Pin, GPIO_PIN_SET);
+        mosiMode(true);
+        if (result != HAL_OK) return result;
+        offset += count;
+        Delay_us(5);
     }
-
+    bool seen[TOTALBOARDS + 1] = {false};
+    for (unsigned offset = 0; offset < (unsigned)returnLen; offset += frameSize) {
+        uint8_t *frame = &rx_data[offset];
+        if (frame[0] != payload - 1U || frame[2] != (reg >> 8) ||
+            frame[3] != (reg & 0xFF) || SpiCRC16(frame, frameSize) != 0)
+            return HAL_ERROR;
+        if (command == CMD_SINGLE_DEV_READ) {
+            if (frame[1] != device) return HAL_ERROR;
+        } else {
+            if (frame[1] == 0 || frame[1] > TOTALBOARDS || seen[frame[1]])
+                return HAL_ERROR;
+            seen[frame[1]] = true;
+        }
+    }
     return HAL_OK;
 }
-
 
 HAL_StatusTypeDef SpiClear(){
 
 	tx_data[0] = 0x00;
 
+	mosiMode(false);
 	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);  // Hold nCS low
-	Delay_us(0.5);
+	Delay_us(1);
 	status = HAL_SPI_Transmit(&hspi1, tx_data, 1, 100);
-	Delay_us(0.5);
+	Delay_us(1);
 	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);  // Pull nCS high
+	mosiMode(true);
 
 	if (status != HAL_OK) {
 		    return status;
@@ -463,212 +377,164 @@ HAL_StatusTypeDef SpiClear(){
 	return HAL_OK;
 }
 
-HAL_StatusTypeDef stackVoltageRead(osMutexId_t *telemetryMutex, Telemetry_t* telemetry){
+HAL_StatusTypeDef BQ79616_StartADC(void)
+{
+    /* ACTIVE_CELL encodes 6S as zero, 14S as eight. */
+    HAL_StatusTypeDef result = writeByte(CMD_STACK_WRITE, 0, 0x0003,
+                                         ACTIVECHANNELS - 6);
+    if (result != HAL_OK) return result;
+    /* ADC-only inputs, two GPIOs per register. No internal weak pulls. */
+    for (uint16_t reg = 0x000E; reg <= 0x0011; ++reg) {
+        result = writeByte(CMD_STACK_WRITE, 0, reg, 0x12);
+        if (result != HAL_OK) return result;
+    }
+    result = writeByte(CMD_STACK_WRITE, 0, REG_CONTROL2, 0x01); /* TSREF_EN */
+    if (result != HAL_OK) return result;
+    /* TSREF ramp is 6 ms (10-90%, 1 uF); allow 20 ms before ADC start.
+     * Revisit for the actual TSREF capacitance and external RC network. */
+    HAL_Delay(20);
+    result = writeByte(CMD_STACK_WRITE, 0, 0x030D, 0x06);
+    if (result == HAL_OK) HAL_Delay(3); /* Eight main round robins: 8 * 192 us nominal. */
+    return result;
+}
 
-	/*
-	B0 00 03 0A A6 13 //Step 1 (16 active cells)
-	B0 03 0D 06 52 76 //Step 2 (set continuous run and start ADC)
-	delay [192us + (5us x TOTALBOARDS)] //Step 3 (delay)
-	A0 05 68 1F 5C 2D //Step 4 (read ADC measurements)
-	*/
-  HAL_StatusTypeDef status;
-
-	uint32_t max_mV = 0;
-	uint32_t min_mV = 0xFFFFFFFF;
-	uint32_t pack_mV = 0;
-
-	uint32_t localCellVoltages[ACTIVECHANNELS];
-
-	//Step one configure all devices for 14 active cells
-	tx_data[0] = 0x0D;
-	tx_data[1] = 0x00;
-	tx_data[2] = 0x03;
-	tx_data[3] = 0x0E;
-
-	status = SpiWrite(4);
-
-	if(status != HAL_OK){
-		printf("ACTIVE_CELL broadcast WRITE ERROR\r\n");
-		return status;
-	}
-
-	//Step two, set continuous run and start ADC
-
-	tx_data[0] = 0xD0;
-	tx_data[1] = 0x03;
-	tx_data[2] = 0x0D;
-	tx_data[3] = 0x06;
-
-	status = SpiWrite(4);
-
-
-	if (status != HAL_OK) {
-		printf("VREAD ADC START BAD\r\n");
-		return status;
-	}
-
-	//Step three, wait for first ADC conversion
-	//192us + approximately 5us per board, assuming 8 BQ79616 devices
-
-	Delay_us(192 + (5*8));
-
-	//Step 4, stack read
-	//Start = VCELL14_HI = 0x056C
-	//14CELLS * 2 bytes = 28 bytes/device
-
-	tx_data[0] = 0xA0; //Stack read
-	tx_data[1] = (VCELL14_HI >> 8);
-	tx_data[2] = VCELL14_HI & 0xFF;
-	tx_data[3] = CELL_BYTES_PER_BQ - 1;
-
-	status = SpiRead(4, TOTAL_RESPONSE);
-
-	if(status != HAL_OK){
-		printf("Stack voltage read failed\r\n");
-		return status;
-	}
-
-	//Step five, parse response from all 8 BQ79616 devices
-
-	for (uint8_t board = 0; board < TOTALBOARDS; board++){
-		//Start of this BQ response 
-		uint16_t frameOffset = board * RESPONSE_BYTES_BQ;
-
-		//First 4 bytes are response header 
-		//Cell data begins at byte 4
-
-		uint16_t dataOffset = frameOffset + 4;
-
-		for(uint8_t regCell = 0; regCell < ACTIVECHANNELS; regCell++){
-
-			uint16_t offset = dataOffset + (regCell * 2);
-
-			uint8_t highByte = rx_data[offset];
-
-			uint8_t lowByte = rx_data[offset + 1];
-
-			uint32_t voltage_mV = convert_adc_to_voltage(highByte, lowByte);
-
-			  /*
-             * regCell = 0  -> Cell 14
-             * regCell = 13 -> Cell 1
-             *
-             * Convert to normal order:
-             *
-             * cellIndex = 0 -> Cell 1
-             * cellIndex = 13 -> Cell 14
-             */
-			uint8_t cellIndex = (ACTIVECHANNELS - 1) - regCell;
-
-
-            /*
-             * Global pack cell index:
-             *
-             * BQ0 -> 0..13
-             * BQ1 -> 14..27
-             * ...
-             * BQ7 -> 98..111
-             */
-
-			uint16_t globalCell = (board * ACTIVECHANNELS) + cellIndex;
-
-			localCellVoltages[globalCell] = voltage_mV;
-
-			//Pack statistic
-
-			pack_mV += voltage_mV;
-
-			if(voltage_mV > max_mV){
-				max_mV = voltage_mV;
-			}
-
-			if(voltage_mV < min_mV){
-				min_mV = voltage_mV;
-			}
-		}
-	}
-
-	//Step 6 update telemetry
-
-	osMutexAcquire(*telemetryMutex, osWaitForever);
-
-	for(uint16_t cell = 0; cell < TOTAL_CELLS; cell++){
-		telemetry->cell_voltage[cell] = localCellVoltages[cell];
-	}
-
-	telemetry->max_cell_voltage_mV = max_mV;
-	telemetry->min_cell_voltage_mV = min_mV;
-	telemetry->pack_voltage_mV = pack_mV;
-
-	osMutexRelease(*telemetryMutex);
-
-	//Step 7, debug output
-	#ifdef DEBUG 1
-	   printf("\r\n--------- PACK VOLTAGES ---------\r\n");
-
-    for (uint8_t board = 0;
-         board < TOTALBOARDS;
-         board++)
-    {
-        printf("BQ%d:\r\n", board);
-
-        for (uint8_t cell = 0;
-             cell < ACTIVECHANNELS;
-             cell++)
-        {
-            uint16_t globalCell =
-                (board * ACTIVECHANNELS) + cell;
-
-            printf(
-                "  Cell %03d: %lu mV\r\n",
-                globalCell + 1,
-                (unsigned long)
-                localCellVoltages[globalCell]
-            );
+HAL_StatusTypeDef stackVoltageRead(osMutexId_t *mutex, Telemetry_t *telemetry)
+{
+    if (mutex == NULL || *mutex == NULL || telemetry == NULL) return HAL_ERROR;
+    int32_t cells[TOTAL_CELLS];
+    int32_t min = INT32_MAX, max = INT32_MIN, pack = 0;
+    tx_data[0] = CMD_STACK_READ;
+    tx_data[1] = VCELL_START_HI >> 8;
+    tx_data[2] = VCELL_START_HI & 0xFF;
+    tx_data[3] = CELL_BYTES_PER_BQ - 1;
+    HAL_StatusTypeDef result = SpiRead(4, TOTAL_RESPONSE);
+    if (result != HAL_OK) return result;
+    for (unsigned frame = 0; frame < TOTALBOARDS; ++frame) {
+        const uint8_t *response = &rx_data[frame * RESPONSE_BYTES_BQ];
+        /* Responses arrive top first; map by address, not arrival order. */
+        unsigned board = response[1] - 1U;
+        for (unsigned regCell = 0; regCell < ACTIVECHANNELS; ++regCell) {
+            const uint8_t *raw = &response[4 + 2 * regCell];
+            if (raw[0] == 0x80 && raw[1] == 0) return HAL_ERROR;
+            int32_t mv = convert_adc_to_voltage(raw[0], raw[1]);
+            cells[board * ACTIVECHANNELS + ACTIVECHANNELS - 1 - regCell] = mv;
+            pack += mv;
+            if (mv < min) min = mv;
+            if (mv > max) max = mv;
         }
     }
-
-
-    printf("---------------------------------\r\n");
-
-    printf(
-        "Pack Voltage: %lu mV\r\n",
-        (unsigned long)pack_mV
-    );
-
-    printf(
-        "Max Cell:     %lu mV\r\n",
-        (unsigned long)max_mV
-    );
-
-    printf(
-        "Min Cell:     %lu mV\r\n",
-        (unsigned long)min_mV
-    );
-
-    printf(
-        "Delta:        %lu mV\r\n",
-        (unsigned long)(max_mV - min_mV)
-    );
-
-    printf("---------------------------------\r\n");
-
-		#endif
+    if (osMutexAcquire(*mutex, osWaitForever) != osOK) return HAL_ERROR;
+    for (unsigned cell = 0; cell < TOTAL_CELLS; ++cell)
+        telemetry->cell_voltage[cell] = cells[cell];
+    telemetry->pack_voltage_mV = pack;
+    telemetry->min_cell_voltage_mV = min;
+    telemetry->max_cell_voltage_mV = max;
+    telemetry->avg_cell_voltage_mV = (float)pack / TOTAL_CELLS;
+    telemetry->tick_ms = HAL_GetTick();
+    telemetry->voltage_valid = true;
+    telemetry->charge_pwr_sense = HAL_GPIO_ReadPin(CHARGE_PWR_SENSE_GPIO_Port,
+                                                  CHARGE_PWR_SENSE_Pin) == GPIO_PIN_SET;
+    telemetry->ready_pwr_sense = HAL_GPIO_ReadPin(READY_PWR_SENSE_GPIO_Port,
+                                                 READY_PWR_SENSE_Pin) == GPIO_PIN_SET;
+    osMutexRelease(*mutex);
     return HAL_OK;
 }
 
-uint32_t convert_adc_to_voltage(uint8_t high_byte, uint8_t low_byte)
+bool convert_gpio_to_temperature(uint16_t gpio_raw, uint16_t tsref_raw, float *celsius)
 {
-    // 1. Combine high and low bytes into a 16-bit signed value
-    uint16_t raw_value = (uint16_t)((high_byte << 8) | low_byte);
+    if (celsius == NULL || gpio_raw == 0 || gpio_raw >= 0x8000U ||
+        tsref_raw == 0 || tsref_raw >= 0x8000U ||
+        BMS_NTC_R0_OHM <= 0.0f || BMS_NTC_PULLUP_OHM <= 0.0f ||
+        BMS_NTC_BETA_K <= 0.0f || BMS_NTC_T0_C <= -273.15f)
+        return false;
+    /* Both ADC values are signed; GPIO and TSREF have DIFFERENT LSB weights. */
+    float gpio_uv = gpio_raw * 152.59f;
+    float reference_uv = tsref_raw * 169.54f;
+    /* Reject near-rail values (short/open); 0.1% guard, not a full wire diagnostic. */
+    float ratio = gpio_uv / reference_uv;
+    if (!isfinite(ratio) || ratio <= 0.001f || ratio >= 0.999f) return false;
+    float resistance = BMS_NTC_PULLUP_OHM * ratio / (1.0f - ratio);
+    float inverse_kelvin = 1.0f / (BMS_NTC_T0_C + 273.15f) +
+                          logf(resistance / BMS_NTC_R0_OHM) / BMS_NTC_BETA_K;
+    if (!isfinite(inverse_kelvin) || inverse_kelvin <= 0.0f) return false;
+    float result = 1.0f / inverse_kelvin - 273.15f;
+    if (!isfinite(result)) return false;
+    *celsius = result;
+    return true;
+}
 
-    // 2. Convert to microvolts (190.73 μV/LSB = 19073/100)
-    uint32_t microvolts = (uint32_t)raw_value * 19073 / 100;
+void invalidateTemperatures(Telemetry_t *telemetry)
+{
+    telemetry->temperature_valid = false;
+    memset(telemetry->gpio_temperature_valid, 0,
+           sizeof(telemetry->gpio_temperature_valid));
+    telemetry->temperature_errors++;
+}
 
-    // 3. Convert to millivolts for better readability
-    uint32_t millivolts = microvolts / 1000;
+HAL_StatusTypeDef stackTemperatureRead(osMutexId_t *mutex, Telemetry_t *telemetry)
+{
+    if (mutex == NULL || *mutex == NULL || telemetry == NULL) return HAL_ERROR;
+    tx_data[0] = CMD_STACK_READ;
+    tx_data[1] = REG_TSREF_HI >> 8;
+    tx_data[2] = REG_TSREF_HI & 0xFF;
+    /* One contiguous read: TSREF then GPIO1..GPIO8, all high/low byte pairs. */
+    tx_data[3] = TEMPERATURE_BYTES_PER_BQ - 1U;
+    HAL_StatusTypeDef result = SpiRead(4, TOTAL_TEMPERATURE_RESPONSE);
+    if (result != HAL_OK) {
+        if (osMutexAcquire(*mutex, osWaitForever) == osOK) {
+            invalidateTemperatures(telemetry);
+            osMutexRelease(*mutex);
+        }
+        return result;
+    }
+    float temperatures[TOTALBOARDS][GPIO_TEMPERATURES_PER_BQ];
+    bool valid[TOTALBOARDS][GPIO_TEMPERATURES_PER_BQ];
+    uint16_t raw[TOTALBOARDS][GPIO_TEMPERATURES_PER_BQ];
+    uint16_t references[TOTALBOARDS];
+    bool all_valid = true;
+    float min = FLT_MAX, max = -FLT_MAX;
+    for (unsigned frame = 0; frame < TOTALBOARDS; ++frame) {
+        const uint8_t *response = &rx_data[frame * TEMPERATURE_RESPONSE_BYTES_BQ];
+        unsigned board = response[1] - 1U;
+        references[board] = ((uint16_t)response[4] << 8) | response[5];
+        for (unsigned gpio = 0; gpio < GPIO_TEMPERATURES_PER_BQ; ++gpio) {
+            const uint8_t *value = &response[6U + gpio * 2U];
+            raw[board][gpio] = ((uint16_t)value[0] << 8) | value[1];
+            temperatures[board][gpio] = NAN;
+            valid[board][gpio] = convert_gpio_to_temperature(raw[board][gpio],
+                                    references[board], &temperatures[board][gpio]);
+            if (!valid[board][gpio]) all_valid = false;
+            else {
+                if (temperatures[board][gpio] < min) min = temperatures[board][gpio];
+                if (temperatures[board][gpio] > max) max = temperatures[board][gpio];
+            }
+        }
+    }
+    if (osMutexAcquire(*mutex, osWaitForever) != osOK) return HAL_ERROR;
+    memcpy(telemetry->tsref_adc_raw, references, sizeof(references));
+    memcpy(telemetry->gpio_adc_raw, raw, sizeof(raw));
+    memcpy(telemetry->gpio_temperature_C, temperatures, sizeof(temperatures));
+    memcpy(telemetry->gpio_temperature_valid, valid, sizeof(valid));
+    telemetry->temperature_scan_tick_ms = HAL_GetTick();
+    telemetry->temperature_valid = all_valid;
+    if (all_valid) {
+        telemetry->temperature_tick_ms = telemetry->temperature_scan_tick_ms;
+        telemetry->min_temperature_C = min;
+        telemetry->max_temperature_C = max;
+        telemetry->pack_temp_C = max;
+    } else {
+        telemetry->temperature_errors++;
+    }
+    osMutexRelease(*mutex);
+    /* Sensor/configuration faults do not require resetting the communication chain. */
+    return HAL_OK;
+}
 
-    return millivolts;
+int32_t convert_adc_to_voltage(uint8_t high_byte, uint8_t low_byte)
+{
+    int16_t raw = (int16_t)(((uint16_t)high_byte << 8) | low_byte);
+    /* Signed 190.73 microvolts/LSB, result in millivolts. */
+    return ((int32_t)raw * 19073) / 100000;
 }
 
 HAL_StatusTypeDef simpleBalancing(){
